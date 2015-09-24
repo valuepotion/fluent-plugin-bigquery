@@ -285,33 +285,38 @@ module Fluent
 
     def insert(table_id_format, rows)
       table_id = generate_table_id(table_id_format, Time.at(Fluent::Engine.now))
-      res = client().execute(
-        api_method: @bq.tabledata.insert_all,
-        parameters: {
-          'projectId' => @project,
-          'datasetId' => @dataset,
-          'tableId' => table_id,
-        },
-        body_object: {
-          "rows" => rows,
-          "skipInvalidRows" => @skip_invalid_rows,
-          "ignoreUnknownValues" => @ignore_unknown_values
-        }
-      )
-      unless res.success?
-        # api_error? -> client cache clear
-        @cached_client = nil
+      begin
+        res = client().execute(
+          api_method: @bq.tabledata.insert_all,
+          parameters: {
+            'projectId' => @project,
+            'datasetId' => @dataset,
+            'tableId' => table_id,
+          },
+          body_object: {
+            "rows" => rows,
+            "skipInvalidRows" => @skip_invalid_rows,
+            "ignoreUnknownValues" => @ignore_unknown_values
+          }
+        )
+        unless res.success?
+          # api_error? -> client cache clear
+          @cached_client = nil
 
-        res_obj = extract_response_obj(res.body)
-        message = res_obj['error']['message'] || res.body
-        if res_obj
-          if @auto_create_table and res_obj and res_obj['error']['code'] == 404 and /Not Found: Table/i =~ message.to_s
-            # Table Not Found: Auto Create Table
-            create_table(table_id)
+          res_obj = extract_response_obj(res.body)
+          message = res_obj['error']['message'] || res.body
+          if res_obj
+            if @auto_create_table and res_obj and res_obj['error']['code'] == 404 and /Not Found: Table/i =~ message.to_s
+              # Table Not Found: Auto Create Table
+              create_table(table_id)
+            end
           end
+          log.error "tabledata.insertAll API", project_id: @project, dataset: @dataset, table: table_id, code: res.status, message: message
+          raise "failed to insert into bigquery" # TODO: error class
         end
-        log.error "tabledata.insertAll API", project_id: @project, dataset: @dataset, table: table_id, code: res.status, message: message
-        raise "failed to insert into bigquery" # TODO: error class
+      rescue JSON::GeneratorError => _e
+        # do not raise error, because fluentd retries
+        log.error "JSON::GeneratorError", rows: rows.inspect
       end
     end
 
