@@ -123,6 +123,14 @@ module Fluent
     # REQUIRED - The cell cannot be null.
     # REPEATED - Zero or more repeated simple or nested subfields. This mode is only supported when using JSON source files.
 
+    REGEXP_MAX_NUM = 20
+
+    (1..REGEXP_MAX_NUM).each {|i| config_param :"regexp#{i}",  :string, :default => nil }
+    (1..REGEXP_MAX_NUM).each {|i| config_param :"exclude#{i}", :string, :default => nil }
+
+    attr_reader :regexps
+    attr_reader :excludes
+
     def initialize
       super
       require 'json'
@@ -193,6 +201,24 @@ module Fluent
         }
       else
         @get_insert_id = nil
+      end
+
+      @regexps = {}
+      (1..REGEXP_MAX_NUM).each do |i|
+        next unless conf["regexp#{i}"]
+        key, regexp = conf["regexp#{i}"].split(/ /, 2)
+        raise ConfigError, "regexp#{i} does not contain 2 parameters" unless regexp
+        raise ConfigError, "regexp#{i} contains a duplicated key, #{key}" if @regexps[key]
+        @regexps[key] = Regexp.compile(regexp)
+      end
+
+      @excludes = {}
+      (1..REGEXP_MAX_NUM).each do |i|
+        next unless conf["exclude#{i}"]
+        key, exclude = conf["exclude#{i}"].split(/ /, 2)
+        raise ConfigError, "exclude#{i} does not contain 2 parameters" unless exclude
+        raise ConfigError, "exclude#{i} contains a duplicated key, #{key}" if @excludes[key]
+        @excludes[key] = Regexp.compile(exclude)
       end
     end
 
@@ -284,6 +310,7 @@ module Fluent
     end
 
     def insert(table_id_format, rows)
+      log.debug "inserting rows #{rows.count}"
       table_id = generate_table_id(table_id_format, Time.at(Fluent::Engine.now))
       begin
         res = client().execute(
@@ -343,8 +370,18 @@ module Fluent
       rows = []
       chunk.msgpack_each do |row_object|
         # TODO: row size limit
+
+        # row_object == { 'json': row }
+        _selected = filter(row_object['json'])
+        next unless _selected
+
         rows << row_object
       end
+
+      if rows.size == 0
+        return 
+      end
+
 
       # TODO: method
 
@@ -411,6 +448,47 @@ module Fluent
       res_obj = extract_response_obj(response_body)
       return response_body if res_obj.nil?
       res_obj['error']['message'] || response_body
+    end
+
+    # 
+    # regexp에 아무 조건이 설정되어 있지 않으면 기본은 통과(저장한다)
+    # regexp에 조건이 설정되어 있으면 기본은 저장하지 않는다.
+    #
+    # regexp[n] 조건에 하나라도 맞으면 통과(저장한다)
+    # exclude[n] 조건에 하나라도 안 맞으면 저장하지 않는다
+    # 
+    def filter(row)
+      result = (@regexps.size == 0)
+
+      begin
+        @regexps.each do |key, regexp|
+          if match(regexp, row[key].to_s)
+            result = true 
+            break
+          end
+        end
+        @excludes.each do |key, exclude|
+          if match(exclude, row[key].to_s)
+            return false
+          end
+        end
+      rescue => e
+        log.warn "failed to grep events", :error_class => e.class, :error => e.message
+        log.warn_backtrace
+      end
+      result
+    end
+
+    def match(regexp, string)
+      begin
+        return regexp.match(string)
+      rescue ArgumentError => e
+        raise e unless e.message.index("invalid byte sequence in".freeze).zero?
+        log.info "invalid byte sequence is replaced in `#{string}`"
+        string = string.scrub('?')
+        retry
+      end
+      return true
     end
 
     class FieldSchema
