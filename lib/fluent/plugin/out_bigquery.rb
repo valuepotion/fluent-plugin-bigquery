@@ -310,7 +310,6 @@ module Fluent
     end
 
     def insert(table_id_format, rows)
-      log.debug "inserting rows #{rows.count}"
       table_id = generate_table_id(table_id_format, Time.at(Fluent::Engine.now))
       begin
         res = client().execute(
